@@ -73,6 +73,9 @@ function getMessages(options, cb) {
   //     Boolean commentsOnly: Whether or not to only get back comments. Defaults to `false`.
   //     Boolean alertsOnly: Whether ot not to only get back alerts. Lower priority than `options.commentsOnly`. Defaults to `false`.
   //     String page: The messages subpage, `'comments'` or `'alerts'` or `''`, to add to the messages URL. Lower priority than `commentsOnly` and `alertsOnly`. Defaults to `''`.
+  //     Function filter: Called for every message, decides whether or not a message is to be included or not:
+  //     Parameters:
+  //       ScratchMessage message: the message to be filtered (or not filtered)
   //   Function cb:
   //     Parameters:
   //       Object err: Error-object like the one described by `getMessagesAsHTML`.
@@ -80,28 +83,25 @@ function getMessages(options, cb) {
   //
   // Returns: `undefined`
   
-  options.limit = options.limit   || 20
+  options.limit  = options.limit  || 20
   options.offset = options.offset || 0
   if(options.commentsOnly)    options.page = 'comments'
   else if(options.alertsOnly) options.page = 'alerts'
   
   var messages = []
   var limit = options.offset + options.limit
-  var offsetHere = null
-  var whileLoop = function(i, pageIndex, cb) {
-    if(pageIndex === 0) { offsetHere = i }
-    else { offsetHere = 0 }
+  var offsetHere, msg
+  var whileLoop = function(pushed, pageIndex, offset, cb) {
 
     getMessagesAsHTML({ page: options.page, index: pageIndex }, function(error, cbMessages) {
-      if(error) cb(error, undefined)
-    
-      var amountToPush = Math.min(options.limit - messages.length, cbMessages.length)
-      i += amountToPush
-      var month = null, date = null, year = null
-      var current = null
+      if(error) cb(error)
       
-      for(var y = 0; y < offsetHere + amountToPush; y++) {
+      var amountToPush = options.limit
+      var month = null, date = null, year = null
+      var current, msg
+      for(var y = 0; y < offset + amountToPush && y < cbMessages.length; y++) {
         current = cbMessages[y]
+        
         if(current.tagName === 'H3') {
           var split = current.innerHTML.replace(',', '').split(' ')
           if(split.length === 1) {
@@ -109,25 +109,32 @@ function getMessages(options, cb) {
           } else {
             month = split[1], date = split[2], year = split[3]
           }
-          if(y >= offsetHere)
+          if(y >= offset)
             amountToPush += 1
           else
-            offsetHere += 1
+            offset += 1
         } else {
-          if(y >= offsetHere)
-            messages.push(new ScratchMessage(current, month, date, year))
+          msg = new ScratchMessage(current, month, date, year)
+          if(y >= offset) {
+            if(typeof options.filter === 'function' ? options.filter(msg) : true) {
+              messages.push(msg)
+              pushed += 1
+            } else {
+              amountToPush += 1
+            }
+          }
         }
       }
       
-      if(i < limit) {
-        whileLoop(i, pageIndex + 1, cb)
+      if(pushed < limit) {
+        setTimeout(whileLoop.bind(this, pushed, pageIndex + 1, 0, cb), 4000)
       } else {
         cb(undefined) 
       }
     })
   }
   
-  whileLoop(options.offset, 0, function(error) {
+  whileLoop(0, 0, options.offset, function(error) {
     cb(error, messages)
   })
 }
@@ -198,16 +205,17 @@ ScratchDate.prototype.toString = function() {
   return this.string
 }
 
-ScratchMessage.DESC = {}
-ScratchMessage.DESC.COMMENT          = 0
-ScratchMessage.DESC.REPLY            = 1
-ScratchMessage.DESC.STUDIO_ACTIVITY  = 2
-ScratchMessage.DESC.STUDIO_INVITE    = 3
-ScratchMessage.DESC.FOLLOWED         = 4
-ScratchMessage.DESC.FORUM_POST       = 5
-ScratchMessage.DESC.LOVED            = 6
-ScratchMessage.DESC.FAVORITED        = 7
-ScratchMessage.DESC.REMIXED          = 8
+ScratchMessage.TYPE = {}
+ScratchMessage.TYPE.COMMENT          = 0
+ScratchMessage.TYPE.REPLY            = 1
+ScratchMessage.TYPE.STUDIO_ACTIVITY  = 2
+ScratchMessage.TYPE.STUDIO_INVITE    = 3
+ScratchMessage.TYPE.FOLLOWED         = 4
+ScratchMessage.TYPE.FORUM_POST       = 5
+ScratchMessage.TYPE.LOVED            = 6
+ScratchMessage.TYPE.FAVORITED        = 7
+ScratchMessage.TYPE.REMIXED          = 8
+
 ScratchMessage.DESCS = ['commented on', 'replied to your comment on', 'There was new activity in', 'invited you to curate the studio', 'is now following you', 'There are new posts in the forum thread:', 'loved your project', 'favorited your project', 'remixed your project']
 ScratchMessage.DESC_FINDS = [1, 1, 0, 1, 1, 0, 1, 1, 1] // the index at which to look for the string
 
@@ -232,11 +240,11 @@ function ScratchMessage(elem, month, date, year) {
   //   Array links: Array of HTMLElements of tagName 'a', all children of first argument that are links.
   //   Array parts: Array of values of all text-message elements of first argument.
   //   String messageString: All values of `ScratchMessage.parts` joined together.
-  //   Number type: Type of the message, one of the values of the static enumerator `ScratchMessage.DESC`.
+  //   Number type: Type of the message, one of the values of the static enumerator `ScratchMessage.TYPE`.
   //   Array users: Array of all parts that are usernames.
   //
   // Static properties:
-  //   Object<Number> DESC: Enumerator of the different message types found in `ScratchMessage.type`:
+  //   Object<Number> TYPE: Enumerator of the different message types found in `ScratchMessage.type`:
   //     COMMENT, REPLY, STUDIO_ACTIVITY, STUDIO_INVIITE, FOLLOWED, FORUM_POST, LOVED, FAVORITED, REMIXED
   
   var current
@@ -287,8 +295,7 @@ ScratchMessage.prototype.parseMessage = function() {
   
   this.links = []
   this.parts = []
-  var val
-  var elem
+  var val, elem
   for(var i = 0; i < this.elements.length; i++) {
     elem = this.elements[i]
     val = ScratchMessage.getMessageValue(elem, val)
@@ -302,8 +309,11 @@ ScratchMessage.prototype.parseMessage = function() {
   
   var type
   for(var i = 0; i < ScratchMessage.DESC_FINDS.length; i++) {
-    if(this.parts[ScratchMessage.DESC_FINDS[i]] === ScratchMessage.DESCS[i])
+    if(this.parts[ScratchMessage.DESC_FINDS[i]].trim() === ScratchMessage.DESCS[i]) {
       type = i
+      this.desc = ScratchMessage.DESCS[i]
+      break
+    }
   }
   this.type = type
   
